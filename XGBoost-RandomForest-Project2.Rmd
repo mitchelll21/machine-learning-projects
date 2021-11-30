@@ -3,6 +3,7 @@ title: "Project4"
 output: html_document
 ---
 
+Our goal was to build a predictive model to predict 'bad buys' from used car sale data. Gradient Boosting and Random Forest models were tuned to find the best parameters. 
 
 ```{r}
 options (scipen = 999)
