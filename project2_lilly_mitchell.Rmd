@@ -1,0 +1,799 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+## Library
+
+```{r, message=FALSE, warning=FALSE}
+
+install.packages('tidymodels')
+install.packages('janitor')
+install.packages('skimr')
+install.packages('vip')
+install.packages('ranger')
+
+
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(skimr)
+library(vip)  
+library(readr)
+library(ranger)
+
+library(rpart.plot) # -- plotting decision trees 
+
+
+library(ggplot2)
+library(psych)
+
+library(corrr)
+library(GGally)
+```
+
+## Import
+
+```{r}
+fraud <- read_csv("project_2_training.csv")
+kaggle <- read_csv("project_2_holdout.csv") %>% select(-score)
+```
+
+```{r}
+skimr::skim_without_charts(kaggle)
+```
+
+### explore
+##### File Summary
+
+```{r}
+skim(fraud) -> skim
+skim(kaggle)
+
+write_csv(skim, 'skim.csv')
+
+```
+
+##### Field Summary
+```{r}
+
+skim(fraud)
+
+```
+
+##### Numeric Descriptive Statistics
+
+```{r}
+
+numeric <- fraud %>%
+  select(is.numeric)
+
+
+
+num_desc <- numeric %>%
+  summarise(name = colnames(numeric),
+            count = n(),
+            num_distinct = sapply(numeric, n_distinct),
+            num_missing = sapply(numeric, function(x) sum(is.na(x))),
+            mean = round(sapply(numeric, mean, na.rm = TRUE), 2),
+            stdev = round(sapply(numeric, sd, na.rm = TRUE), 2),
+            min = sapply(numeric, min, na.rm = TRUE),
+            max = sapply(numeric, max, na.rm = TRUE))
+
+write_csv(num_desc, "numdesc.csv")
+
+```
+
+##### Explore Target
+```{r}
+fraud %>%
+  count(EVENT_LABEL) %>%
+  mutate(pct = n/sum(n)) -> fraud_pct
+
+fraud_pct %>%
+  ggplot(aes(x=EVENT_LABEL, y=pct)) +
+  geom_col() +
+  geom_text(aes(label=pct) ,color="red") + 
+  labs(title="Fraud Rate")
+```
+
+#### Frequency 
+```{r}
+
+fraud %>%
+  na.omit() %>%
+  select_if(is.factor) -> c
+
+for (c in colnames(c)) {
+  fact <- fraud %>%
+    group_by(EVENT_LABEL) %>%
+    count(!!as.name(c)) %>%
+    ggplot(aes(x=!!as.name(c), y=n, fill = as.factor(EVENT_LABEL))) +
+    geom_col(position = 'fill') +
+    geom_hline(yintercept = 0.05) +
+    labs(title = paste('Total fraud By ',c), x = c, y = 'EVENT_LABEL', fill = 'EVENT_LABEL')
+  print(fact)
+    
+}
+ 
+```
+
+##### Explore Categorical Variables
+
+Variables of Interest to the Company:
+Network Speed, paperless billing, phone model
+
+```{r, warning=FALSE}
+
+# -- comparative histogram
+ggplot(fraud,aes(x=email_domain)) + 
+    geom_histogram(data=subset(fraud, EVENT_LABEL == 'Fraud'),fill = "red", alpha = 0.2, bins = 100) +
+    geom_histogram(data=subset(fraud, EVENT_LABEL == 'Legit'),fill = "blue", alpha = 0.2,  bins = 100) + 
+   labs(title = "fraud Distribution Based on Total Billed",
+        subtitle = "Blue = fraud, Red = No fraud")
+
+ggplot(fraud,aes(x=billing_postal)) + 
+    geom_bar(data=subset(fraud, EVENT_LABEL == 'fraud'),fill = "red", alpha = 0.2, bins = 50) +
+    geom_bar(data=subset(fraud, EVENT_LABEL == 'legit'),fill = "blue", alpha = 0.2,  bins = 50) + 
+   labs(title = "fraud Distribution Based on Late Payments",
+        subtitle = "Blue = fraud, Red = No fraud")
+
+ 
+
+#fraud %>%
+na.omit %>%
+ggplot(aes(x=phone_model, fill = EVENT_LABEL)) + 
+    geom_bar(stat = 'count') +
+  labs(title = 'fraud by Phone Model') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = .5))
+
+
+
+fraud %>%
+na.omit %>%
+ggplot(aes(x=network_speed, fill = EVENT_LABEL)) + 
+    geom_bar(stat = 'count') +
+  labs(title = 'fraud by Network Speed') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = .5))
+
+
+fraud %>%
+na.omit %>%
+ggplot(aes(x=paperless_billing, fill = EVENT_LABEL)) + 
+    geom_bar(stat = 'count') +
+  labs(title = 'fraud by Paperless Billing') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = .5))
+```
+
+##### Numeric Exploration
+
+```{r}
+for (c in c("monthly_minutes", "total_billed", "prev_balance")) {
+  N <- fraud %>%
+    ggplot(aes(x =!!as.name(c))) +
+    geom_boxplot() +
+    labs(title = paste(c), x=c)
+  print(N)
+}
+
+```
+
+##### Correlation matrix
+
+```{r, message = FALSE}
+
+fraud %>%
+  na.omit() %>%
+  select(is.numeric, -senior_citizen) %>%
+  cor() %>%
+  as.data.frame() %>%
+  rownames_to_column(var="variable") -> fraud_cor
+
+summary(fraud_cor)
+
+fraud_cor %>%
+  pivot_longer(cols= is.numeric, 
+               names_to="name", 
+               values_to="correlation" ) %>%
+  ggplot(aes(x=variable, y=name, fill=correlation)) +
+  geom_tile() +
+  scale_fill_gradient2(mid="#FBFEF9",low="#0C6291",high="#A63446")+
+  geom_text(aes(label=round(correlation,3))) +
+  labs(title = 'Correlation of Numeric Variables in fraud Data')
+
+
+#another way to explore possible correlation
+library(psych)
+
+pairs.panels(fraud_cor)
+
+
+
+```
+
+### frequency encoding
+
+It is a way to utilize the frequency of the categories. In the cases where the frequency is related somewhat to the target variable. 
+Three-step for this :
+1. Select a categorical variable you would like to transform
+2. Group by the categorical variable and obtain counts of each category
+3. Join it back with the training data set
+
+```{r}
+city_freq_count  <- fraud %>%
+  count(billing_city, sort=TRUE) %>%
+  select(billing_city, billing_city_count = n)
+
+city_freq_count %>% head()
+# join back to fraud, drop email_domain. note the left join
+fraud <- fraud %>%
+  left_join(city_freq_count) %>%
+  select(-billing_city)
+
+# join back to kaggle, drop email domain, fix missing values note the left join!!!
+kaggle <- kaggle %>%
+  left_join(city_freq_count) %>%
+  select(-billing_city)
+
+```
+
+### Target encoding
+
+Target encoding is the process of replacing a categorical value with the mean of the target variable. 
+
+```{r}
+domain_fraud_rate <- fraud %>%
+  group_by(EVENT_LABEL, email_domain) %>%
+  summarise(n = n()) %>%
+  pivot_wider(names_from = EVENT_LABEL, values_from = n, values_fill = 0.0) %>%
+  mutate(domain_pct_fraud = fraud/(fraud + legit)) %>%
+  select(email_domain, domain_pct_fraud)
+
+domain_fraud_rate
+# join back to fraud, drop email_domain. note the left join
+fraud <- fraud %>%
+  left_join(domain_fraud_rate) %>%
+  select(-email_domain)
+
+# jion back to kaggle, drop email domain, fix missing values note the left join!!!
+kaggle <- kaggle %>%
+  left_join(domain_fraud_rate) %>%
+  mutate(pct_fraud = if_else(is.na(domain_pct_fraud),0,domain_pct_fraud))%>%
+  select(-email_domain)
+kaggle
+
+
+fraud %>%
+  mutate(billing_postal = as.numeric(billing_postal)) -> fraud
+
+```
+
+## prep 
+
+
+```{r}
+set.seed(6969)
+
+fraud %>% 
+  mutate(EVENT_LABEL = as.factor(EVENT_LABEL)) -> fraud_prep
+
+train_test_spit<- initial_split(fraud_prep, prop = 0.7, strata = EVENT_LABEL)
+
+train <- training(train_test_spit)
+test  <- testing(train_test_spit)
+
+sprintf("Train PCT : %1.2f%%", nrow(train)/ nrow(fraud_prep) * 100)
+sprintf("Test  PCT : %1.2f%%", nrow(test)/ nrow(fraud_prep) * 100)
+
+```
+
+
+
+## Recipe, Model Workflow 
+
+```{r}
+
+# -- define recipe 
+fraud_recipe <- recipe(EVENT_LABEL ~ ., data=train ) %>%
+   update_role(EVENT_ID, 
+              new_role="IGNORE") %>%
+  step_rm(ip_address, user_agent, phone_number, EVENT_TIMESTAMP, locale, merchant_id, applicant_name, billing_address, tranaction_initiate, billing_state, billing_postal, signature_image, inital_amount) %>%
+  step_impute_mean(all_numeric_predictors())%>%
+  step_impute_mode(all_nominal_predictors())%>%
+  step_dummy(all_nominal_predictors()) %>%
+  prep()
+
+# -- define model 
+fraud_rf_spec <- rand_forest(trees= 100, mtry = 3, min_n = 2) %>%
+  set_mode("classification")    %>%
+  set_engine("ranger",
+             importance = "impurity")
+
+fraud_rf_wf <- workflow() %>%
+  add_recipe(fraud_recipe) %>%
+  add_model(fraud_rf_spec) %>%
+  fit(train)
+
+
+```
+
+## Evaluate 
+
+We want to operate at a 6% false positive rate, when looking at the score threshold for that fpr, we see 0.915, so we take 1-0.915 to get a threshold of 0.085. The metrics for that is:
+
+```{r}
+options(yardstick.event_first = TRUE)
+model_score <- function(df, model, model_name){
+  scored_df <- predict(model,df, type = "prob") %>%
+    bind_cols(.,predict(model, df)) %>%
+    bind_cols(df) %>%
+    mutate(model_name = model_name)
+  
+  return(scored_df)
+}
+train_scored <- model_score(train,fraud_rf_wf,"rf training" )
+test_scored <- model_score(test,fraud_rf_wf,"rf testing" )
+
+model_score2 <- function(df, model, model_name){
+  scored_df <- predict(model,df, type = "prob") %>%
+    bind_cols(.,predict(model, df)) %>%
+    bind_cols(df) %>%
+    mutate(model_name = model_name,
+          predict_class = as.factor(if_else(.pred_fraud >=0.08, 'fraud' , 'legit')))
+  
+  return(scored_df)
+}
+
+train_scored2 <- model_score(train, fraud_rf_wf, 'rf train 2')
+test_scored2 <- model_score2(test, fraud_rf_wf, 'rf test2')
+
+# -- Metrics: Train and Test -- 
+bind_rows(train_scored2,test_scored2) %>% 
+  group_by(model_name) %>%
+  metrics(EVENT_LABEL, .pred_fraud, estimate = .pred_class) %>%
+  pivot_wider(id=c(model_name),names_from =.metric, values_from = .estimate) %>%
+  mutate(misclassification_rate = 1 - accuracy)
+
+# -- ROC Chart -- 
+bind_rows(train_scored2,test_scored2) %>% 
+  group_by(model_name) %>%
+  roc_curve(EVENT_LABEL, .pred_fraud) %>%
+  autoplot() +
+  geom_vline(xintercept=0.08, color="red") +
+  labs(title = "ROC chart")
+
+precision(test_scored2, EVENT_LABEL, .pred_class)
+recall(test_scored2, EVENT_LABEL, .pred_class)
+
+
+calc_metrics(test_scored2)
+
+
+test_scored2 %>%
+  roc_curve(EVENT_LABEL, .pred_fraud) %>%
+  mutate(fpr = round((1-specificity), 2),
+tpr = round(sensitivity, 2),
+score_threshold = 1-round(.threshold, 3)) %>%
+  group_by(fpr) %>%
+  summarise(score_threshold = max(score_threshold),
+            tpr = max(tpr))
+```
+
+# Logistic
+## Standard Logistic Model 
+
+1. make a recipe 
+
+```{r}
+
+logistic_spec <- logistic_reg() %>%
+  set_mode("classification") %>%
+  set_engine("glm")
+
+logistic_wf <- workflow() %>%
+  add_recipe(fraud_recipe) %>%
+  add_model(logistic_spec) %>%
+  fit(train)
+```
+
+
+```{r}
+#standard model
+
+logistic_wf %>%
+  pull_workflow_fit() %>%
+  tidy() %>%
+   mutate(across(is.numeric,round,3))
+
+logistic_wf %>%
+  pull_workflow_fit() %>%
+  vip()
+
+# -- deal w. the first event issue -- # 
+options(yardstick.event_first = TRUE)
+
+predict(logistic_wf, train, type="prob") %>%
+  bind_cols(predict(logistic_wf, train, type="class")) %>%
+  bind_cols(train)  %>%
+  metrics(EVENT_LABEL, estimate = .pred_class, .pred_fraud)
+
+predict(logistic_wf, test, type="prob") %>%
+  bind_cols(predict(logistic_wf, test, type="class")) %>%
+  bind_cols(test) -> logistic_test 
+
+logistic_test %>%
+  metrics(EVENT_LABEL, estimate = .pred_class, .pred_fraud)
+
+
+
+calc_metrics <- function(data_set){
+  data_set %>%
+  conf_mat(EVENT_LABEL, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") + labs(title="confusion matrix default") -> p 
+  print(p)
+
+data_set %>%
+  accuracy(EVENT_LABEL, estimate = .pred_class) %>%
+  bind_rows(data_set %>%
+  precision(EVENT_LABEL, estimate = .pred_class)   ) %>%
+  bind_rows(data_set %>%
+  recall(EVENT_LABEL, estimate = .pred_class)  )
+
+}
+
+
+calc_metrics(logistic_test)
+
+logistic_test %>%
+  roc_curve(EVENT_LABEL, .pred_fraud) %>%
+  mutate(fpr = round((1-specificity), 2),
+tpr = round(sensitivity, 2),
+score_threshold = 1-round(.threshold, 3)) %>%
+  group_by(fpr) %>%
+  summarise(score_threshold = max(score_threshold),
+            tpr = max(tpr))
+
+logistic_test %>%
+  mutate(model = "train") %>%
+  group_by(model) %>%
+  roc_curve(EVENT_LABEL, .pred_fraud) %>%
+  autoplot()
+```
+ they want a fpr of 6% so that means we have to use a threshold of 0.901??
+ 
+```{r}
+logistic_test %>%
+  ggplot(aes(.pred_fraud, fill=EVENT_LABEL)) +
+  geom_histogram(bins=20) +
+  xlim(0, 1) +
+  geom_vline(aes(xintercept=0.5)) +
+  labs(title="logistic score distribution")
+
+```
+
+#### Evaluation
+```{r}
+logistic_test %>%
+  conf_mat(EVENT_LABEL, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") + labs(title="confusion matrix default")
+
+logistic_test %>%
+  accuracy(EVENT_LABEL, estimate = .pred_class)  
+
+logistic_test %>%
+  precision(EVENT_LABEL, estimate = .pred_class)   
+
+logistic_test %>%
+  recall(EVENT_LABEL, estimate = .pred_class)  
+
+
+
+```
+
+#### Further Evaluation
+
+```{r}
+
+logistic_test %>%
+  ggplot(aes(.pred_fraud, fill=EVENT_LABEL)) +
+  geom_histogram(bins=100) +
+  xlim(0, .5) +
+  geom_vline(aes(xintercept=0.01)) +
+  labs(title="change threshold to 0.01")
+
+logistic_test %>%
+  mutate(predict_class = as.factor(if_else(.pred_fraud >=0.01, 'fraud' , 'legit'))) %>%
+  conf_mat(EVENT_LABEL, estimate = predict_class) %>%
+  autoplot(type = "heatmap") +
+  labs(title="confusion matrix threshold >= 0.01")
+
+
+logistic_test %>%
+   mutate(predict_class = as.factor(if_else(.pred_fraud >=0.01, 'fraud', 'legit'))) %>%
+  accuracy(EVENT_LABEL, predict_class)  
+
+logistic_test %>%
+   mutate(predict_class = as.factor(if_else(.pred_fraud >=0.01, 'fraud' , 'legit'))) %>%
+  precision(EVENT_LABEL, estimate = predict_class)   
+
+logistic_test %>%
+   mutate(predict_class = as.factor(if_else(.pred_fraud >=0.01, 'fraud' , 'legit'))) %>%
+  recall(EVENT_LABEL, estimate = predict_class)  
+
+```
+
+```{r}
+predict(logistic_wf, test, type="prob") %>%
+  bind_cols(predict(logistic_wf, test, type="class")) %>%
+  bind_cols(test) %>%
+  mutate(.pred_class = as.factor(if_else(.pred_fraud >=0.01, 'fraud', 'legit'))) -> logistic_test2 
+
+logistic_test2 %>%
+  metrics(EVENT_LABEL, estimate = .pred_class, .pred_fraud)
+
+calc_metrics(logistic_test2)
+
+logistic_test2 %>%
+  mutate(model = "train") %>%
+  group_by(model) %>%
+  roc_curve(EVENT_LABEL, .pred_fraud) %>%
+  autoplot()
+
+logistic_test2 %>%
+  roc_curve(EVENT_LABEL, .pred_fraud) %>%
+  mutate(fpr = round((1-specificity), 2),
+tpr = round(sensitivity, 2),
+score_threshold = 1-round(.threshold, 3)) %>%
+  group_by(fpr) %>%
+  summarise(score_threshold = max(score_threshold),
+            tpr = max(tpr))
+
+
+logistic_test2 %>%
+  pr_curve(EVENT_LABEL, .pred_fraud) %>%
+  mutate(
+    recall = round(recall, 2),
+    .threshold = round(.threshold, 3),
+    precision = round(precision, 3)
+  ) %>%
+  group_by(recall) %>%
+  summarise(precision = max(precision),
+            .threshold = min(.threshold))
+```
+
+Distribution
+```{r}
+logistic_test2 %>%
+  ggplot(aes(.pred_fraud, fill=EVENT_LABEL)) +
+  geom_histogram(bins=20) +
+  xlim(0, 1) +
+  geom_vline(aes(xintercept=0.05)) +
+  labs(title="logistic score distribution")
+
+```
+
+
+## Tree
+### Evaluator 
+
+```{r}
+category_eval <- function(col){
+  
+fraud%>% 
+  group_by(EVENT_LABEL) %>%
+  count(!!as.name(col)) %>%
+  pivot_wider(values_from=c(n), names_from = EVENT_LABEL) %>%
+      mutate(pct_1 = `1`/ (`0` + `1`),
+             pct_0 = 1 - pct_1) %>%
+    arrange(desc(pct_1)) %>%
+    print()
+}
+
+for (col in colnames(fraud %>% select_if(is.factor))){
+  print(col)
+  category_eval(col)
+}
+
+```
+
+
+```{r}
+category_eval_gini <- function(col){
+  
+fraud%>% 
+  group_by(EVENT_LABEL) %>%
+  count(!!as.name(col)) %>%
+  pivot_wider(values_from=c(n), names_from = EVENT_LABEL) %>%
+      mutate(pct_1 = `1`/ (`0` + `1`),
+             pct_0 = 1 - pct_1) %>%
+    mutate(gini_x = 2*pct_1*pct_0,
+           entropy_x = -pct_1*log(pct_1,2)  -pct_0*log(pct_0,2)) %>%
+    arrange(desc(pct_1)) %>%
+    print()
+}
+
+for (col in colnames(fraud %>% select_if(is.factor))){
+  print(col)
+  category_eval_gini(col)
+}
+```
+
+### tree?
+```{r}
+tree_spec <- decision_tree(cost_complexity = 0.01, tree_depth=5) %>%
+  set_mode("classification") %>%
+  set_engine("rpart", model=TRUE)
+
+tree_wf <- workflow() %>%
+  add_recipe(fraud_recipe) %>%
+  add_model(tree_spec) %>%
+  fit(train)
+
+tree_wf %>%
+  pull_workflow_fit() %>%
+  vip()
+
+# -- plot tree
+rpart.plot(tree_wf$fit$fit$fit)
+rpart.rules(tree_wf$fit$fit$fit)
+
+# -- deal w. the first event issue -- # 
+options(yardstick.event_first = TRUE)
+predict(tree_wf, train, type="prob") %>%
+  bind_cols(predict(tree_wf, train, type="class")) %>%
+  bind_cols(train)  %>%
+  metrics(EVENT_LABEL, estimate = .pred_class, .pred_fraud)
+
+predict(tree_wf, test, type="prob") %>%
+  bind_cols(predict(tree_wf, test, type="class")) %>%
+  bind_cols(test) -> tree_test 
+
+tree_test %>%
+  metrics(EVENT_LABEL, estimate = .pred_class, .pred_fraud)
+
+```
+
+### bind with log model
+```{r}
+bind_rows(tree_test %>%
+  mutate(model = "decision tree"), 
+logistic_test %>%
+  mutate(model = "logistic reg")) %>%
+  group_by(model) %>%
+  metrics(EVENT_LABEL, estimate = .pred_class, .pred_fraud) %>%
+  pivot_wider(id_cols = model, values_from = .estimate, names_from = .metric)
+
+bind_rows(tree_test %>%
+  mutate(model = "decision tree"), 
+logistic_test %>%
+  mutate(model = "logistic reg")) %>%
+  group_by(model) %>%
+  roc_curve(EVENT_LABEL, .pred_fraud) %>%
+  autoplot() +
+  geom_vline(xintercept=0.1, color="red") +
+  labs(title = "ROC chart")
+
+
+
+
+calc_metrics <- function(data_set){
+  data_set %>%
+  conf_mat(EVENT_LABEL, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") + labs(title="confusion matrix default") -> p 
+  print(p)
+
+data_set %>%
+  accuracy(EVENT_LABEL, estimate = .pred_class) %>%
+  bind_rows(data_set %>%
+  precision(EVENT_LABEL, estimate = .pred_class)   ) %>%
+  bind_rows(data_set %>%
+  recall(EVENT_LABEL, estimate = .pred_class)  )
+
+}
+calc_metrics(tree_test)
+calc_metrics(logistic_test)
+
+```
+
+
+```{r}
+tree_test %>%
+  ggplot(aes(.pred_fraud, fill=EVENT_LABEL)) +
+  geom_histogram(bins=100) +
+  xlim(0, 1) +
+  geom_vline(aes(xintercept=0.05)) +
+  labs(title="Tree score distribution")
+
+logistic_test %>%
+  ggplot(aes(.pred_fraud, fill=EVENT_LABEL)) +
+  geom_histogram(bins=100) +
+  xlim(0, 1) +
+  geom_vline(aes(xintercept=0.05)) +
+  labs(title="logistic score distribution")
+```
+
+## change the threshold 
+```{r}
+
+tree_test %>%
+  ggplot(aes(.pred_fraud, fill=EVENT_LABEL)) +
+  geom_histogram(bins=100) +
+  xlim(0, 1) +
+  geom_vline(aes(xintercept=0.05)) +
+  labs(title="change threshold to 0.05")
+
+tree_test %>%
+  mutate(.pred_class = as.factor(if_else(.pred_fraud >=0.05,'fraud','legit'))) -> tree_test2
+
+logistic_test %>%
+   mutate(.pred_class = as.factor(if_else(.pred_fraud >=0.05,'fraud','legit'))) -> logistic_test2
+
+calc_metrics(tree_test2)
+calc_metrics(logistic_test2)
+
+```
+
+
+
+
+### Better Tree
+
+```{r}
+
+
+tree_spec3 <- decision_tree(cost_complexity = 0.01, tree_depth=5) %>%
+  set_mode("classification") %>%
+  set_engine("rpart",
+             model=TRUE)
+
+tree_wf3 <- workflow() %>%
+  add_recipe(fraud_recipe) %>%
+  add_model(tree_spec3) %>%
+  fit(train)
+
+tree_wf3 %>%
+  extract_fit_parsnip %>%
+  vip()
+
+# -- plot tree
+rpart.plot(tree_wf3$fit$fit$fit)
+rpart.rules(tree_wf3$fit$fit$fit)
+
+# -- deal w. the first event issue -- # 
+options(yardstick.event_first = TRUE)
+predict(tree_wf3, train, type="prob") %>%
+  bind_cols(predict(tree_wf3, train, type="class")) %>%
+  bind_cols(train)  %>%
+  metrics(EVENT_LABEL, estimate = .pred_class, .pred_fraud)
+
+predict(tree_wf3, test, type="prob") %>%
+  bind_cols(predict(tree_wf3, test, type="class")) %>%
+  bind_cols(test)%>%
+  mutate(.pred_class = as.factor(if_else(.pred_fraud >=0.05,'fraud','legit'))) -> tree_test3 
+
+tree_test3 %>%
+  metrics(EVENT_LABEL, estimate = .pred_class, .pred_fraud)
+
+
+#calc_metrics(tree_test)
+calc_metrics(tree_test3)
+
+```
+
+
+
+
+
+## Kaglge Scoring 
+```{r}
+new_benchmark <- predict(fraud_rf_wf,kaggle, type = "prob") %>%
+  bind_cols(kaggle) %>%
+  mutate(.pred_class = as.factor(if_else(.pred_fraud >=0.01, 'fraud', 'legit'))) %>%
+  select(EVENT_ID,EVENT_LABEL = .pred_fraud)
+
+head(new_benchmark)
+
+write_csv(new_benchmark,"kaggle_benchmark.csv")
+
+```
+

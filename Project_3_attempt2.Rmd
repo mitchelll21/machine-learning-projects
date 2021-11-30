@@ -1,0 +1,236 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+options (scipen = 999)
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(skimr)
+library(vip)
+library(doParallel)
+library(textrecipes)
+library(xgboost)
+```
+
+```{r}
+jobs <- read_csv("job_training.csv") %>% clean_names() %>% mutate(fraudulent = factor(fraudulent))
+jobs %>% head()
+```
+
+
+```{r}
+jobs %>%
+  group_by(fraudulent) %>%
+  summarize(n=n()) %>%
+  ungroup() %>%
+  mutate(pct = n/sum(n))
+```
+
+
+
+```{r}
+library(tidymodels)
+set.seed(6969)
+
+jobs_split <- initial_split(jobs %>%sample_n(1000),prop = 0.7, strata = fraudulent)
+
+train <- training(jobs_split)
+test <- testing(jobs_split)
+
+sprintf("Train PCT : %1.2f%%", nrow(train)/ nrow(jobs) * 100)
+sprintf("Test  PCT : %1.2f%%", nrow(test)/ nrow(jobs) * 100)
+
+```
+##XGB Boost Model
+
+```{r}
+job_recipe <- recipe(fraudulent ~ description + company_profile + 
+                       has_company_logo, 
+                     train) %>%
+   step_indicate_na(has_company_logo) %>%
+  step_tokenize(description , company_profile) %>%
+  step_stopwords(description, company_profile) %>%
+  step_ngram(description,company_profile, num_tokens = 2, min_num_tokens = 1) %>%
+  step_tokenfilter(description,company_profile, max_tokens = 100, min_times = 5) %>%
+  step_tfidf(description, company_profile)
+
+
+xgb_model <- boost_tree(trees = tune(),tree_depth = tune(), min_n = tune(), learn_rate = tune() ) %>%
+  set_mode("classification") %>%
+  set_engine("xgboost")
+
+xgb_model
+
+xgb_workflow <- workflow() %>% 
+  add_recipe(job_recipe) %>%
+  add_model(xgb_model)
+
+param_grid <- grid_regular(
+  trees(),
+  tree_depth(),
+  min_n(),
+  learn_rate(),
+  levels = 2
+)
+
+param_grid
+
+set.seed(96)
+job_folds <- vfold_cv(train, v=3)
+job_folds
+
+
+set.seed(420)
+
+doParallel::registerDoParallel() ## comment to turn parallel off 
+
+xgb_rs <- tune_grid(
+  xgb_workflow,
+  resamples = job_folds,
+  grid = param_grid, 
+  control = control_grid(save_pred = TRUE, verbose = TRUE)
+) 
+
+xgb_rs
+```
+
+##Reviewed Tuning Results
+
+```{r}
+xgb_rs %>%
+  collect_metrics()%>%
+  mutate_if(is.numeric, round,3) %>% 
+  pivot_wider(names_from = .metric, values_from=c(mean, std_err))
+```
+
+##Visualize Each Parameter
+
+```{r}
+xgb_rs %>%
+  collect_metrics() %>%
+  mutate_if(is.numeric, round,3) %>%
+  ggplot(aes(tree_depth, mean, )) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2)
+
+xgb_rs %>%
+  collect_metrics()  %>%
+  mutate_if(is.numeric, round,3) %>%
+  ggplot(aes(min_n, mean, )) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2)
+
+xgb_rs %>%
+  collect_metrics()  %>%
+  mutate_if(is.numeric, round,3) %>%
+  ggplot(aes(learn_rate, mean, )) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2)
+```
+
+
+##Results and Select Best Parameters
+
+```{r}
+xgb_rs %>%
+  show_best("roc_auc") %>%
+  print()
+
+xgb_best <- xgb_rs %>%
+  select_best("roc_auc") 
+
+print(xgb_best)
+```
+## refitting workflow with "best" parameters
+
+```{r}
+xgb_best_wf <- xgb_workflow %>%
+  finalize_workflow(xgb_best)
+
+print(xgb_best_wf)
+
+xgb_best_fit  <- xgb_best_wf %>%
+  fit(data = train)
+```
+
+
+```{r}
+xgb_final_fit %>% 
+  pull_workflow_fit() %>% 
+  vip(20)
+```
+
+
+```{r}
+
+# -- score training  
+options(yardstick.event_first = TRUE)
+
+
+predict(xgb_final_fit, train, type="prob") %>%
+bind_cols(
+  predict(xgb_final_fit, train) %>%
+    bind_cols(.,train)) -> scored_train 
+
+# -- score testing 
+predict(xgb_final_fit, test, type="prob") %>%
+  bind_cols(
+      predict(xgb_final_fit, test) %>%
+      bind_cols(., test)) -> scored_test   
+
+# -- Metrics: Train and Test 
+scored_train %>% 
+  metrics(label, estimate = .pred_class, .pred_1) %>%
+  mutate(part="training") %>%
+  bind_rows( scored_test %>% 
+                 metrics(label, estimate = .pred_class, .pred_1) %>%
+               mutate(part="testing") ) %>%
+  pivot_wider(names_from = .metric, values_from=.estimate)
+  
+# -- variable importance: top 10
+xgb_final_fit %>%
+  pull_workflow_fit() %>%
+  vip(num_features = 10)
+
+  
+```
+
+```{r}
+options(yardstick.event_first = TRUE)
+
+  
+
+scored_train %>% 
+  mutate(part="training") %>%
+  bind_rows( scored_test %>% 
+               mutate(part="testing") ) %>%
+ group_by(part) %>%
+ roc_curve(label, .pred_FAKE) %>%
+  autoplot()
+
+
+
+```
+
+
+## Random Forest
+
+##Kaggle
+```{r}
+kaggle <- predict(xgb_best_fit, job_holdout, type = 'prob') %>%
+  bind_cols(job_holdout) %>%
+  mutate(fraudulent = .pred_1) %>%
+  dplyr::select(job_id, fraudulent)
+
+write_csv(kggle, 'kaggle3.csv')
+
+
+
+
+```
