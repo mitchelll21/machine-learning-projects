@@ -5,7 +5,10 @@ output:
     df_print: paged
 ---
 
-## Project 5 - Digit
+The goal of this project was to compare an MLP, XGBoost, and Random Forest model performance for identifying handwritten digits.
+
+
+## Digit Identification
 
 ```{r}
 library(tidyverse)
