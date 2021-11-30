@@ -3,6 +3,10 @@ title: "R Notebook"
 output: html_notebook
 ---
 
+
+Our goal is to identify fraudulent job postings from text analysis and predicitve modeling. Gradient Boosting and Random Forest Models were tuned to find the best parameters.
+
+
 ```{r}
 options (scipen = 999)
 
