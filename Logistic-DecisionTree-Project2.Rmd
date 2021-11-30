@@ -3,6 +3,9 @@ title: "R Notebook"
 output: html_notebook
 ---
 
+The goal of this project was to create a model that could predict fraud with specified parameters
+
+
 ## Library
 
 ```{r, message=FALSE, warning=FALSE}
